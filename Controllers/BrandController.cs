@@ -1,7 +1,7 @@
 using backend.DTOs;
-using backend.Models;
+using backend.services;
+using FluentValidation;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 
 namespace backend.Controllers
 {
@@ -9,43 +9,123 @@ namespace backend.Controllers
     [ApiController]
     public class BrandController : ControllerBase
     {
-        private readonly StoreContext _context;
+        private readonly IValidator<BrandInsertDto> _brandInsertValidator;
+        private readonly IValidator<BrandUpdateDto> _brandUpdateValidator;
+        private readonly ICommonServices<BrandDto, BrandInsertDto, BrandUpdateDto> _brandService;
 
-        public BrandController(StoreContext context)
+        public BrandController(
+            IValidator<BrandInsertDto> brandInsertValidator,
+            IValidator<BrandUpdateDto> brandUpdateValidator,
+            [FromKeyedServices("brandService")]
+            ICommonServices<BrandDto, BrandInsertDto, BrandUpdateDto> brandService)
         {
-            _context = context;
+            _brandInsertValidator = brandInsertValidator;
+            _brandUpdateValidator = brandUpdateValidator;
+            _brandService = brandService;
         }
 
         // GET: api/Brand
         [HttpGet]
-        public async Task<IEnumerable<BrandDto>> Get()
+        public async Task<ActionResult<IEnumerable<BrandDto>>> Get()
         {
-            return await _context.Brands.Select(b => new BrandDto
-            {
-                Id = b.BrandId,
-                Name = b.Name
-            }).ToListAsync();
+            return Ok(await _brandService.Get());
+        }
+
+        // GET: api/Brand/{id}
+        [HttpGet("{id}")]
+        public async Task<ActionResult<BrandDto>> GetById(int id)
+        {
+            var brand = await _brandService.GetById(id);
+            return brand == null ? NotFound() : Ok(brand);
         }
 
         // POST: api/Brand
         [HttpPost]
         public async Task<ActionResult<BrandDto>> Add(BrandInsertDto brandInsertDto)
         {
-            var brand = new Brand
+            var validationResult = await _brandInsertValidator.ValidateAsync(brandInsertDto);
+
+            if (!validationResult.IsValid)
             {
-                Name = brandInsertDto.Name
-            };
+                return BadRequest(validationResult.Errors.Select(e => new { e.PropertyName, e.ErrorMessage }));
+            }
 
-            await _context.Brands.AddAsync(brand);
-            await _context.SaveChangesAsync();
+            var brandDto = await _brandService.Add(brandInsertDto);
 
-            var brandDto = new BrandDto
+            if (brandDto == null)
             {
-                Id = brand.BrandId,
-                Name = brand.Name
-            };
+                return Conflict(new { message = "Ya existe una marca con ese nombre." });
+            }
 
-            return CreatedAtAction(nameof(Get), new { id = brand.BrandId }, brandDto);
+            return CreatedAtAction(nameof(GetById), new { id = brandDto.Id }, brandDto);
+        }
+
+        // PUT: api/Brand/{id}
+        [HttpPut("{id}")]
+        public async Task<ActionResult<BrandDto>> Update(int id, BrandUpdateDto brandUpdateDto)
+        {
+            var validationResult = await _brandUpdateValidator.ValidateAsync(brandUpdateDto);
+
+            if (!validationResult.IsValid)
+            {
+                return BadRequest(validationResult.Errors.Select(e => new { e.PropertyName, e.ErrorMessage }));
+            }
+
+            var existingBrand = await _brandService.GetById(id);
+            if (existingBrand == null)
+            {
+                return NotFound();
+            }
+
+            var brandDto = await _brandService.Update(id, brandUpdateDto);
+
+            if (brandDto == null)
+            {
+                return Conflict(new { message = "Ya existe otra marca con ese nombre." });
+            }
+
+            return Ok(brandDto);
+        }
+
+        // DELETE: api/Brand/{id}
+        [HttpDelete("{id}")]
+        public async Task<ActionResult<BrandDto>> Delete(int id)
+        {
+            var existingBrand = await _brandService.GetById(id);
+
+            if (existingBrand == null)
+            {
+                return NotFound();
+            }
+
+            //  Impedir eliminar una marca que tenga cervezas asociadas (409 Conflict)
+            if (_brandService is BrandService service && await service.HasBeers(id))
+            {
+                return Conflict(new { message = "No se puede eliminar la marca porque tiene cervezas asociadas." });
+            }
+
+            var brandDto = await _brandService.Delete(id);
+            return Ok(brandDto);
+        }
+
+        // GET: api/Brand/{id}/beers
+        //   devuelve las cervezas de esa marca
+        [HttpGet("{id}/beers")]
+        public async Task<ActionResult<IEnumerable<BeerDto>>> GetBeersByBrand(int id)
+        {
+            if (_brandService is BrandService service)
+            {
+                var beers = await service.GetBeersByBrandId(id);
+
+                if (beers == null)
+                {
+                    return NotFound(new { message = $"No se encontró la marca con Id {id}." });
+                }
+
+                return Ok(beers);
+            }
+
+            return StatusCode(500, "Servicio de marcas no compatible.");
         }
     }
 }
